@@ -1,0 +1,8 @@
+{
+  "name": "IPARK리조트 AI 바이브코딩 경진대회 투표",
+  "description": "IPARK리조트 임직원 3팀 투표, 실시간 현황 대시보드, 경영진 평가 70% + 임직원 투표 30% 합산 및 1~3위 최종 순위 발표 시스템",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
