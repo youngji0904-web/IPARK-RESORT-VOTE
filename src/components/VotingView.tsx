@@ -11,6 +11,7 @@ import {
   LogOut,
   UserCheck,
   RotateCcw,
+  RotateCw,
   ShieldCheck,
   Lock
 } from 'lucide-react';
@@ -28,8 +29,18 @@ export const VotingView: React.FC = () => {
     logoutEmployee,
     canRevote,
     revoteCountForEmployee,
-    isLoggedOut
+    isLoggedOut,
+    forceRefresh,
+    isLiveConnected
   } = useApp();
+
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    await forceRefresh();
+    setTimeout(() => setIsRefreshing(false), 500);
+  };
 
   // If user just logged out, show the logout screen
   if (isLoggedOut) {
@@ -128,14 +139,26 @@ export const VotingView: React.FC = () => {
             </div>
           </div>
 
-          <button
-            id="btn-logout-employee"
-            onClick={logoutEmployee}
-            className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 text-xs font-semibold flex items-center gap-1.5 transition-colors border border-slate-200 cursor-pointer"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>로그아웃</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              id="btn-manual-sync-view1"
+              onClick={handleManualRefresh}
+              className="px-2.5 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold flex items-center gap-1 transition-colors border border-indigo-200 cursor-pointer"
+              title="실시간 새로고침"
+            >
+              <RotateCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-indigo-600' : ''}`} />
+              <span className="hidden sm:inline">실시간 갱신</span>
+            </button>
+
+            <button
+              id="btn-logout-employee"
+              onClick={logoutEmployee}
+              className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 text-xs font-semibold flex items-center gap-1.5 transition-colors border border-slate-200 cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>로그아웃</span>
+            </button>
+          </div>
         </div>
 
         {/* Big "제출했습니다!" Card */}
@@ -309,6 +332,16 @@ export const VotingView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            id="btn-manual-sync-view2"
+            onClick={handleManualRefresh}
+            className="px-2.5 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold flex items-center gap-1 transition-colors border border-indigo-200 cursor-pointer"
+            title="실시간 새로고침"
+          >
+            <RotateCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-indigo-600' : ''}`} />
+            <span className="hidden sm:inline">실시간 갱신</span>
+          </button>
+
           {isEditing && (
             <button
               onClick={handleCancelRevote}
@@ -331,10 +364,16 @@ export const VotingView: React.FC = () => {
       {/* Main Instruction Banner */}
       <div className="rounded-3xl bg-gradient-to-br from-indigo-50 via-white to-cyan-50 border border-indigo-100 p-6 sm:p-7 mb-6 shadow-xs relative overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800">
-            <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-            최대 3팀 자율 투표제 (1~3팀 선택 가능)
-          </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800">
+              <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+              최대 3팀 자율 투표제 (1~3팀 선택 가능)
+            </span>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              실시간 참가자 자동 반영 중 ({participants.length}팀)
+            </span>
+          </div>
           <span className="text-xs text-slate-500 font-medium">
             임직원 투표 <strong className="text-indigo-600">30%</strong> 반영
           </span>

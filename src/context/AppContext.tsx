@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Participant, VoteRecord, CandidateScore, ActiveTab, UserRole, AdminSubTab } from '../types';
 import { INITIAL_PARTICIPANTS } from '../data/initialParticipants';
 import { calculateCandidateScores } from '../utils/scoring';
@@ -12,6 +12,8 @@ interface AppContextType {
   
   // Real-time synchronization state
   isLiveConnected: boolean;
+  lastSyncedAt: number;
+  forceRefresh: () => Promise<void>;
 
   // Employee ID Auth
   currentEmployeeId: string | null;
@@ -209,11 +211,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [userRole]);
 
   // -------------------------------------------------------------
-  // Real-time synchronization with Backend Server
+  // Real-time synchronization with Backend Server (Mobile Optimized)
   // -------------------------------------------------------------
-  const fetchServerState = useCallback(async () => {
+  const [lastSyncedAt, setLastSyncedAt] = useState<number>(Date.now());
+  const lastFetchTimeRef = useRef<number>(0);
+
+  const fetchServerState = useCallback(async (isManual: boolean = false) => {
     try {
-      const res = await fetch('/api/state');
+      const now = Date.now();
+      lastFetchTimeRef.current = now;
+      // High-entropy cache buster + no-cache headers to defeat aggressive mobile caching
+      const res = await fetch(`/api/state?_t=${now}&_r=${Math.floor(Math.random() * 100000)}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+        },
+      });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.participants)) {
@@ -226,65 +240,112 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setRevoteCounts(data.revoteCounts);
         }
         setIsLiveConnected(true);
+        setLastSyncedAt(Date.now());
       }
     } catch (err) {
       console.warn('[Sync] Server state fetch warning:', err);
     }
   }, []);
 
+  const forceRefresh = useCallback(async () => {
+    soundManager.playSelect();
+    await fetchServerState(true);
+  }, [fetchServerState]);
+
   useEffect(() => {
     // 1. Initial immediate fetch
     fetchServerState();
 
-    // 2. Server-Sent Events (SSE) for instant real-time live sync
+    // 2. Server-Sent Events (SSE) with auto-reconnection for mobile
     let eventSource: EventSource | null = null;
-    try {
-      eventSource = new EventSource('/api/events');
-      eventSource.onopen = () => {
-        setIsLiveConnected(true);
-      };
-      eventSource.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.type === 'SYNC' && payload.data) {
-            if (Array.isArray(payload.data.participants)) {
-              setParticipants(payload.data.participants);
-            }
-            if (Array.isArray(payload.data.votes)) {
-              setVotes(payload.data.votes);
-            }
-            if (payload.data.revoteCounts && typeof payload.data.revoteCounts === 'object') {
-              setRevoteCounts(payload.data.revoteCounts);
-            }
-            setIsLiveConnected(true);
-          }
-        } catch {
-          // heartbeat or unformatted data
-        }
-      };
-      eventSource.onerror = () => {
-        setIsLiveConnected(false);
-      };
-    } catch {
-      // EventSource fallback
-    }
+    let sseReconnectTimer: NodeJS.Timeout | null = null;
 
-    // 3. Polling fallback every 4 seconds + visibility re-check
+    const setupSSE = () => {
+      if (eventSource) {
+        try {
+          eventSource.close();
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        eventSource = new EventSource('/api/events');
+        eventSource.onopen = () => {
+          setIsLiveConnected(true);
+        };
+        eventSource.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload.type === 'SYNC' && payload.data) {
+              if (Array.isArray(payload.data.participants)) {
+                setParticipants(payload.data.participants);
+              }
+              if (Array.isArray(payload.data.votes)) {
+                setVotes(payload.data.votes);
+              }
+              if (payload.data.revoteCounts && typeof payload.data.revoteCounts === 'object') {
+                setRevoteCounts(payload.data.revoteCounts);
+              }
+              setIsLiveConnected(true);
+              setLastSyncedAt(Date.now());
+            }
+          } catch {
+            // heartbeat or ping
+          }
+        };
+        eventSource.onerror = () => {
+          setIsLiveConnected(false);
+          // Try reconnect after 2.5s for mobile connections
+          if (sseReconnectTimer) clearTimeout(sseReconnectTimer);
+          sseReconnectTimer = setTimeout(() => {
+            setupSSE();
+          }, 2500);
+        };
+      } catch {
+        // Fallback to rapid polling
+      }
+    };
+
+    setupSSE();
+
+    // 3. High-frequency active polling (1.2 seconds)
+    // Ensures sub-second live updates on all mobile devices even if SSE is suspended by OS/Browser
     const pollInterval = setInterval(() => {
       fetchServerState();
-    }, 4000);
+    }, 1200);
 
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
+    // 4. Mobile Lifecycle & Interaction Handlers (iOS Safari / Android Chrome)
+    const handleForegroundWakeup = () => {
+      fetchServerState();
+      setupSSE();
+    };
+
+    const handleUserTouch = () => {
+      // If user touches the screen and more than 1.2s has passed since last fetch, sync immediately
+      if (Date.now() - lastFetchTimeRef.current > 1200) {
         fetchServerState();
       }
     };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    window.addEventListener('visibilitychange', handleForegroundWakeup);
+    window.addEventListener('pageshow', handleForegroundWakeup);
+    window.addEventListener('focus', handleForegroundWakeup);
+    window.addEventListener('online', handleForegroundWakeup);
+    window.addEventListener('touchstart', handleUserTouch, { passive: true });
 
     return () => {
-      if (eventSource) eventSource.close();
+      if (eventSource) {
+        try {
+          eventSource.close();
+        } catch {}
+      }
+      if (sseReconnectTimer) clearTimeout(sseReconnectTimer);
       clearInterval(pollInterval);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('visibilitychange', handleForegroundWakeup);
+      window.removeEventListener('pageshow', handleForegroundWakeup);
+      window.removeEventListener('focus', handleForegroundWakeup);
+      window.removeEventListener('online', handleForegroundWakeup);
+      window.removeEventListener('touchstart', handleUserTouch);
     };
   }, [fetchServerState]);
 
@@ -549,6 +610,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         adminSubTab,
         setAdminSubTab,
         isLiveConnected,
+        lastSyncedAt,
+        forceRefresh,
         currentEmployeeId,
         currentEmployeeName,
         loginEmployee,

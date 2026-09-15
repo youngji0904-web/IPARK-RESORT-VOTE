@@ -40,6 +40,7 @@ function generateInitialMockVotes(participantsList: Participant[]): VoteRecord[]
 let currentParticipants: Participant[] = [];
 let currentVotes: VoteRecord[] = [];
 let currentRevoteCounts: Record<string, number> = {};
+let stateVersion = Date.now();
 
 // Load saved data or initialize
 function loadStateFromDisk() {
@@ -51,7 +52,8 @@ function loadStateFromDisk() {
         currentParticipants = parsed.participants;
         currentVotes = Array.isArray(parsed.votes) ? parsed.votes : [];
         currentRevoteCounts = parsed.revoteCounts || {};
-        console.log(`[Storage] Loaded ${currentParticipants.length} participants and ${currentVotes.length} votes from disk.`);
+        stateVersion = parsed.updatedAt || Date.now();
+        console.log(`[Storage] Loaded ${currentParticipants.length} participants and ${currentVotes.length} votes from disk (v${stateVersion}).`);
         return;
       }
     }
@@ -63,6 +65,7 @@ function loadStateFromDisk() {
   currentParticipants = [...INITIAL_PARTICIPANTS];
   currentVotes = generateInitialMockVotes(currentParticipants);
   currentRevoteCounts = {};
+  stateVersion = Date.now();
   saveStateToDisk();
 }
 
@@ -71,11 +74,12 @@ function saveStateToDisk() {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
+    stateVersion = Date.now();
     const data = {
       participants: currentParticipants,
       votes: currentVotes,
       revoteCounts: currentRevoteCounts,
-      updatedAt: Date.now(),
+      updatedAt: stateVersion,
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
@@ -87,12 +91,15 @@ function saveStateToDisk() {
 const sseClients = new Set<express.Response>();
 
 function broadcastState() {
+  stateVersion = Date.now();
   const payload = JSON.stringify({
     type: 'SYNC',
     data: {
+      version: stateVersion,
       participants: currentParticipants,
       votes: currentVotes,
       revoteCounts: currentRevoteCounts,
+      updatedAt: stateVersion,
     },
   });
   for (const client of sseClients) {
@@ -110,23 +117,41 @@ async function startServer() {
   const app = express();
   app.use(express.json());
 
+  // CORS & Anti-Cache Middleware for mobile devices & webviews
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Pragma');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
   // -------------------------------------------------------------
   // SSE Real-time Stream
   // -------------------------------------------------------------
   app.get('/api/events', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Cache-Control', 'no-cache, no-transform, no-store');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.flushHeaders?.();
 
     // Send immediate current state
     const initialPayload = JSON.stringify({
       type: 'SYNC',
       data: {
+        version: stateVersion,
         participants: currentParticipants,
         votes: currentVotes,
         revoteCounts: currentRevoteCounts,
+        updatedAt: stateVersion,
       },
     });
     res.write(`data: ${initialPayload}\n\n`);
@@ -138,25 +163,31 @@ async function startServer() {
     });
   });
 
-  // Keep-alive heartbeat every 15 seconds
+  // Keep-alive heartbeat every 5 seconds for mobile cellular connections
   setInterval(() => {
     for (const client of sseClients) {
       try {
-        client.write(': keepalive\n\n');
+        client.write(': ping\n\n');
       } catch {
         sseClients.delete(client);
       }
     }
-  }, 15000);
+  }, 5000);
 
   // -------------------------------------------------------------
   // REST API Endpoints
   // -------------------------------------------------------------
   app.get('/api/state', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
     res.json({
+      version: stateVersion,
       participants: currentParticipants,
       votes: currentVotes,
       revoteCounts: currentRevoteCounts,
+      updatedAt: stateVersion,
     });
   });
 
