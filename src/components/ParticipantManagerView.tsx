@@ -143,12 +143,16 @@ export const ParticipantManagerView: React.FC<ParticipantManagerViewProps> = ({
       )}
 
       {/* Top Banner */}
-      <div className="flex items-center justify-between gap-3 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex flex-wrap items-center gap-2 mb-1">
             <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
               <Users className="w-3.5 h-3.5" />
               참여자 실시간 관리
+            </span>
+            <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              접속자 전원 실시간 즉시 반영 중
             </span>
             <span className="text-xs text-slate-500 font-medium">
               현재 총 {participants.length}팀 등록됨
@@ -167,6 +171,14 @@ export const ParticipantManagerView: React.FC<ParticipantManagerViewProps> = ({
             <X className="w-5 h-5" />
           </button>
         )}
+      </div>
+
+      {/* Real-time Notice Banner */}
+      <div className="mb-6 p-3 bg-indigo-50/70 border border-indigo-100 rounded-xl text-xs text-indigo-900 flex items-center gap-2.5">
+        <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
+        <span>
+          <strong>실시간 동기화 활성화:</strong> 관리자 화면에서 참가자(팀명/프로젝트 주제/부서)를 추가·수정·삭제하면 투표에 접속한 <strong>모든 임직원 화면에 새로고침 없이 즉시 반영</strong>됩니다.
+        </span>
       </div>
 
       {/* Action Buttons */}

@@ -10,6 +10,9 @@ interface AppContextType {
   adminSubTab: AdminSubTab;
   setAdminSubTab: (tab: AdminSubTab) => void;
   
+  // Real-time synchronization state
+  isLiveConnected: boolean;
+
   // Employee ID Auth
   currentEmployeeId: string | null;
   currentEmployeeName: string | null;
@@ -30,7 +33,7 @@ interface AppContextType {
   isMuted: boolean;
   toggleSound: () => void;
   
-  // Participant management
+  // Participant management (실시간 서버 전파)
   addParticipant: (participant: Omit<Participant, 'id'>) => void;
   updateParticipant: (id: string, data: Partial<Participant>) => void;
   deleteParticipant: (id: string) => void;
@@ -38,13 +41,13 @@ interface AppContextType {
   clearAllParticipants: () => void;
   resetAllTestData: () => void;
 
-  // Voting
+  // Voting (실시간 서버 전파)
   submitVote: (selectedIds: string[], voterName?: string) => boolean;
   clearMyVote: () => void;
   addSimulatedVotes: (count: number) => void;
   clearAllVotes: () => void;
 
-  // Executive evaluation
+  // Executive evaluation (실시간 서버 전파)
   updateExecutiveScore: (id: string, score: number, feedback?: string) => void;
   batchUpdateExecutiveScores: (scoresMap: Record<string, number>) => void;
 
@@ -60,39 +63,13 @@ const STORAGE_KEY_CURRENT_EMPLOYEE_ID = 'vibe_emp_id_v1';
 const STORAGE_KEY_CURRENT_EMPLOYEE_NAME = 'vibe_emp_name_v1';
 const STORAGE_KEY_REVOTE_COUNTS = 'vibe_revote_counts_v1';
 
-// Initial mock votes to show a lively dashboard on first open
-function generateInitialMockVotes(participants: Participant[]): VoteRecord[] {
-  if (participants.length < 3) return [];
-  const mockNames = [
-    { id: '240001', name: '이수진 책임' },
-    { id: '240002', name: '박민우 수석' },
-    { id: '240003', name: '한정우 프로' },
-    { id: '240004', name: '송지혜 매니저' },
-    { id: '240005', name: '오승훈 책임' },
-    { id: '240006', name: '배하은 사원' },
-    { id: '240007', name: '조현우 프로' },
-    { id: '240008', name: '임나경 수석' },
-  ];
-  const pIds = participants.map((p) => p.id);
-
-  return mockNames.map((mockUser, idx) => {
-    // Pick 3 random
-    const shuffled = [...pIds].sort(() => 0.5 - Math.random());
-    return {
-      id: `vote-init-${idx + 1}`,
-      voterId: mockUser.id,
-      voterName: mockUser.name,
-      selectedParticipantIds: shuffled.slice(0, 3),
-      timestamp: Date.now() - (mockNames.length - idx) * 1000 * 60 * 3,
-      revoteCount: 0,
-    };
-  });
-}
-
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // User Role State: 'employee' by default; admin role uses sessionStorage so it resets on reconnect/new tab
+  // Live connection status
+  const [isLiveConnected, setIsLiveConnected] = useState<boolean>(true);
+
+  // User Role State
   const [userRole, setUserRole] = useState<UserRole>(() => {
     try {
       const sessionSaved = sessionStorage.getItem(STORAGE_KEY_USER_ROLE);
@@ -134,7 +111,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [isLoggedOut, setIsLoggedOut] = useState<boolean>(false);
 
-  // Participants State
+  // Participants State: cached from localStorage then immediately synced with server
   const [participants, setParticipants] = useState<Participant[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_PARTICIPANTS);
@@ -156,13 +133,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) return parsed;
       }
-      if (localStorage.getItem('vibe_has_initialized') === 'true') {
-        return [];
-      }
     } catch {
       // fallback
     }
-    return generateInitialMockVotes(INITIAL_PARTICIPANTS);
+    return [];
   });
 
   // Dynamically compute myVote based on current logged in Employee ID
@@ -176,7 +150,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isMuted, setIsMuted] = useState<boolean>(() => soundManager.isMuted());
   const [openMyVoteModal, setOpenMyVoteModal] = useState<boolean>(false);
 
-  // Sync to localStorage
+  // Sync to local storage as fallback cache
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY_PARTICIPANTS, JSON.stringify(participants));
@@ -192,6 +166,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // ignore
     }
   }, [votes]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY_REVOTE_COUNTS, JSON.stringify(revoteCounts));
+    } catch {
+      // ignore
+    }
+  }, [revoteCounts]);
 
   useEffect(() => {
     try {
@@ -220,46 +202,91 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     try {
       sessionStorage.setItem(STORAGE_KEY_USER_ROLE, userRole);
-      // Clean up legacy localStorage key to ensure admin logs out on browser restart/reconnect
       localStorage.removeItem(STORAGE_KEY_USER_ROLE);
     } catch {
       // ignore
     }
   }, [userRole]);
 
-  // Sync across browser tabs with BroadcastChannel
-  useEffect(() => {
-    let bc: BroadcastChannel | null = null;
+  // -------------------------------------------------------------
+  // Real-time synchronization with Backend Server
+  // -------------------------------------------------------------
+  const fetchServerState = useCallback(async () => {
     try {
-      bc = new BroadcastChannel('vibe_competition_channel');
-      bc.onmessage = (event) => {
-        if (event.data?.type === 'SYNC_STATE') {
-          if (event.data.participants) setParticipants(event.data.participants);
-          if (event.data.votes) setVotes(event.data.votes);
+      const res = await fetch('/api/state');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.participants)) {
+          setParticipants(data.participants);
+        }
+        if (Array.isArray(data.votes)) {
+          setVotes(data.votes);
+        }
+        if (data.revoteCounts && typeof data.revoteCounts === 'object') {
+          setRevoteCounts(data.revoteCounts);
+        }
+        setIsLiveConnected(true);
+      }
+    } catch (err) {
+      console.warn('[Sync] Server state fetch warning:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    // 1. Initial immediate fetch
+    fetchServerState();
+
+    // 2. Server-Sent Events (SSE) for instant real-time live sync
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource('/api/events');
+      eventSource.onopen = () => {
+        setIsLiveConnected(true);
+      };
+      eventSource.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'SYNC' && payload.data) {
+            if (Array.isArray(payload.data.participants)) {
+              setParticipants(payload.data.participants);
+            }
+            if (Array.isArray(payload.data.votes)) {
+              setVotes(payload.data.votes);
+            }
+            if (payload.data.revoteCounts && typeof payload.data.revoteCounts === 'object') {
+              setRevoteCounts(payload.data.revoteCounts);
+            }
+            setIsLiveConnected(true);
+          }
+        } catch {
+          // heartbeat or unformatted data
         }
       };
+      eventSource.onerror = () => {
+        setIsLiveConnected(false);
+      };
     } catch {
-      // BroadcastChannel not available in all contexts
+      // EventSource fallback
     }
+
+    // 3. Polling fallback every 4 seconds + visibility re-check
+    const pollInterval = setInterval(() => {
+      fetchServerState();
+    }, 4000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchServerState();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      if (bc) bc.close();
+      if (eventSource) eventSource.close();
+      clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, []);
-
-  const broadcastChange = useCallback((updatedParts?: Participant[], updatedVotes?: VoteRecord[]) => {
-    try {
-      const bc = new BroadcastChannel('vibe_competition_channel');
-      bc.postMessage({
-        type: 'SYNC_STATE',
-        participants: updatedParts,
-        votes: updatedVotes,
-      });
-      bc.close();
-    } catch {
-      // ignore
-    }
-  }, []);
+  }, [fetchServerState]);
 
   const toggleSound = useCallback(() => {
     const next = soundManager.toggleMute();
@@ -271,7 +298,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return calculateCandidateScores(participants, votes);
   }, [participants, votes]);
 
-  // Actions
+  // -------------------------------------------------------------
+  // Actions (Optimistic Local + Server Persistence & SSE Broadcast)
+  // -------------------------------------------------------------
   const addParticipant = useCallback((data: Omit<Participant, 'id'>) => {
     const colors = [
       'from-blue-500 to-indigo-600',
@@ -288,62 +317,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       avatarColor: data.avatarColor || colors[Math.floor(Math.random() * colors.length)],
       executiveScore: data.executiveScore ?? 85,
     };
-    setParticipants((prev) => {
-      const next = [...prev, newParticipant];
-      broadcastChange(next, undefined);
-      return next;
-    });
+
+    setParticipants((prev) => [...prev, newParticipant]);
     soundManager.playClick();
-  }, [broadcastChange]);
+
+    fetch('/api/participants', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newParticipant),
+    }).catch((err) => console.error('[API Error] addParticipant:', err));
+  }, []);
 
   const updateParticipant = useCallback((id: string, data: Partial<Participant>) => {
-    setParticipants((prev) => {
-      const next = prev.map((p) => (p.id === id ? { ...p, ...data } : p));
-      broadcastChange(next, undefined);
-      return next;
-    });
+    setParticipants((prev) => prev.map((p) => (p.id === id ? { ...p, ...data } : p)));
     soundManager.playClick();
-  }, [broadcastChange]);
+
+    fetch(`/api/participants/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }).catch((err) => console.error('[API Error] updateParticipant:', err));
+  }, []);
 
   const deleteParticipant = useCallback((id: string) => {
-    setParticipants((prev) => {
-      const next = prev.filter((p) => p.id !== id);
-      broadcastChange(next, undefined);
-      return next;
-    });
-    // Also remove from votes
-    setVotes((prev) => {
-      const next = prev.map((v) => ({
+    setParticipants((prev) => prev.filter((p) => p.id !== id));
+    setVotes((prev) =>
+      prev.map((v) => ({
         ...v,
         selectedParticipantIds: v.selectedParticipantIds.filter((pid) => pid !== id),
-      }));
-      broadcastChange(undefined, next);
-      return next;
-    });
+      }))
+    );
     soundManager.playClick();
-  }, [broadcastChange]);
+
+    fetch(`/api/participants/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }).catch((err) => console.error('[API Error] deleteParticipant:', err));
+  }, []);
 
   const resetParticipantsToDefault = useCallback(() => {
     setParticipants(INITIAL_PARTICIPANTS);
-    try {
-      localStorage.setItem(STORAGE_KEY_PARTICIPANTS, JSON.stringify(INITIAL_PARTICIPANTS));
-    } catch {
-      // ignore
-    }
-    broadcastChange(INITIAL_PARTICIPANTS, undefined);
     soundManager.playClick();
-  }, [broadcastChange]);
+
+    fetch('/api/participants/reset', {
+      method: 'POST',
+    }).catch((err) => console.error('[API Error] resetParticipantsToDefault:', err));
+  }, []);
 
   const clearAllParticipants = useCallback(() => {
     setParticipants([]);
-    try {
-      localStorage.removeItem(STORAGE_KEY_PARTICIPANTS);
-    } catch {
-      // ignore
-    }
-    broadcastChange([], undefined);
     soundManager.playClick();
-  }, [broadcastChange]);
+
+    fetch('/api/participants/clear', {
+      method: 'POST',
+    }).catch((err) => console.error('[API Error] clearAllParticipants:', err));
+  }, []);
 
   const loginEmployee = useCallback((id: string, name?: string) => {
     const cleanId = id.trim();
@@ -374,7 +401,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const canRevote = useCallback((id: string) => {
     const clean = id.trim().toUpperCase();
     const count = revoteCounts[clean] || 0;
-    // Exactly 1 revote opportunity allowed (count === 0 means revote is still available!)
     return count < 1;
   }, [revoteCounts]);
 
@@ -390,7 +416,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetVoterName = currentEmployeeName || voterName || `임직원 (${targetVoterId})`;
     const cleanVoterId = targetVoterId.trim().toUpperCase();
 
-    // Check if this voter already voted once
     const alreadyVotedBefore = votes.some(
       (v) => v.voterId.trim().toUpperCase() === cleanVoterId
     );
@@ -398,20 +423,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let newRevoteCount = revoteCounts[cleanVoterId] || 0;
     if (alreadyVotedBefore) {
       newRevoteCount += 1;
-      setRevoteCounts((prev) => {
-        const next = { ...prev, [cleanVoterId]: newRevoteCount };
-        try {
-          localStorage.setItem(STORAGE_KEY_REVOTE_COUNTS, JSON.stringify(next));
-        } catch {
-          // ignore
-        }
-        return next;
-      });
+      setRevoteCounts((prev) => ({ ...prev, [cleanVoterId]: newRevoteCount }));
     }
 
     const newRecord: VoteRecord = {
-      id: `vote-${targetVoterId}-${Date.now()}`,
-      voterId: targetVoterId,
+      id: `vote-${cleanVoterId}-${Date.now()}`,
+      voterId: cleanVoterId,
       voterName: targetVoterName,
       selectedParticipantIds: selectedIds,
       timestamp: Date.now(),
@@ -419,71 +436,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setVotes((prev) => {
-      // Strictly replace any existing vote with the same voterId (1 vote per Employee ID)
-      const filtered = prev.filter(
-        (v) => v.voterId.trim().toUpperCase() !== cleanVoterId
-      );
-      const next = [newRecord, ...filtered];
-      broadcastChange(undefined, next);
-      return next;
+      const filtered = prev.filter((v) => v.voterId.trim().toUpperCase() !== cleanVoterId);
+      return [newRecord, ...filtered];
     });
 
     soundManager.playVoteSuccess();
+
+    fetch('/api/votes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        selectedIds,
+        voterId: cleanVoterId,
+        voterName: targetVoterName,
+      }),
+    }).catch((err) => console.error('[API Error] submitVote:', err));
+
     return true;
-  }, [currentEmployeeId, currentEmployeeName, votes, revoteCounts, broadcastChange]);
+  }, [currentEmployeeId, currentEmployeeName, votes, revoteCounts]);
 
   const clearMyVote = useCallback(() => {
     if (!currentEmployeeId) return;
     const cleanId = currentEmployeeId.trim().toUpperCase();
-    setVotes((prev) => {
-      const next = prev.filter((v) => v.voterId.trim().toUpperCase() !== cleanId);
-      broadcastChange(undefined, next);
-      return next;
-    });
+    setVotes((prev) => prev.filter((v) => v.voterId.trim().toUpperCase() !== cleanId));
     soundManager.playClick();
-  }, [currentEmployeeId, broadcastChange]);
+
+    fetch(`/api/votes/${encodeURIComponent(cleanId)}`, {
+      method: 'DELETE',
+    }).catch((err) => console.error('[API Error] clearMyVote:', err));
+  }, [currentEmployeeId]);
 
   const addSimulatedVotes = useCallback((count: number) => {
-    if (participants.length < 3) return;
-    const departments = ['개발팀', '디자인팀', '기획팀', '마케팅', 'HR팀', '재무팀', '영업1팀', 'AI추진TF'];
-    const pIds = participants.map((p) => p.id);
-    const newVotes: VoteRecord[] = [];
-
-    for (let i = 0; i < count; i++) {
-      const randomDept = departments[Math.floor(Math.random() * departments.length)];
-      // Weighted random selection: pick 3 distinct
-      const shuffled = [...pIds].sort(() => 0.5 - Math.random());
-      const chosen = shuffled.slice(0, 3);
-      newVotes.push({
-        id: `sim-vote-${Date.now()}-${i}`,
-        voterId: `sim-voter-${Date.now()}-${i}`,
-        voterName: `${randomDept} 임직원 #${Math.floor(100 + Math.random() * 900)}`,
-        selectedParticipantIds: chosen,
-        timestamp: Date.now() - Math.floor(Math.random() * 60000),
-      });
-    }
-
-    setVotes((prev) => {
-      const next = [...newVotes, ...prev];
-      broadcastChange(undefined, next);
-      return next;
-    });
     soundManager.playSelect();
-  }, [participants, broadcastChange]);
+    fetch('/api/votes/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count }),
+    }).catch((err) => console.error('[API Error] addSimulatedVotes:', err));
+  }, []);
 
   const clearAllVotes = useCallback(() => {
     setVotes([]);
     setRevoteCounts({});
-    try {
-      localStorage.setItem(STORAGE_KEY_VOTES, JSON.stringify([]));
-      localStorage.setItem(STORAGE_KEY_REVOTE_COUNTS, JSON.stringify({}));
-      localStorage.setItem('vibe_has_initialized', 'true');
-    } catch {
-      // ignore
-    }
-    broadcastChange(undefined, []);
     soundManager.playClick();
-  }, [broadcastChange]);
+
+    fetch('/api/votes', {
+      method: 'DELETE',
+    }).catch((err) => console.error('[API Error] clearAllVotes:', err));
+  }, []);
 
   const resetAllTestData = useCallback(() => {
     setParticipants(INITIAL_PARTICIPANTS);
@@ -491,24 +491,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setRevoteCounts({});
     setCurrentEmployeeId(null);
     setCurrentEmployeeName(null);
-    try {
-      localStorage.setItem(STORAGE_KEY_PARTICIPANTS, JSON.stringify(INITIAL_PARTICIPANTS));
-      localStorage.setItem(STORAGE_KEY_VOTES, JSON.stringify([]));
-      localStorage.setItem(STORAGE_KEY_REVOTE_COUNTS, JSON.stringify({}));
-      localStorage.removeItem(STORAGE_KEY_CURRENT_EMPLOYEE_ID);
-      localStorage.removeItem(STORAGE_KEY_CURRENT_EMPLOYEE_NAME);
-      localStorage.setItem('vibe_has_initialized', 'true');
-    } catch {
-      // ignore
-    }
-    broadcastChange(INITIAL_PARTICIPANTS, []);
     soundManager.playClick();
-  }, [broadcastChange]);
+
+    fetch('/api/reset-all', {
+      method: 'POST',
+    }).catch((err) => console.error('[API Error] resetAllTestData:', err));
+  }, []);
 
   const updateExecutiveScore = useCallback((id: string, score: number, feedback?: string) => {
     const clamped = Math.max(0, Math.min(100, Math.round(score)));
-    setParticipants((prev) => {
-      const next = prev.map((p) => {
+    setParticipants((prev) =>
+      prev.map((p) => {
         if (p.id === id) {
           return {
             ...p,
@@ -517,15 +510,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
         }
         return p;
-      });
-      broadcastChange(next, undefined);
-      return next;
-    });
-  }, [broadcastChange]);
+      })
+    );
+
+    fetch(`/api/participants/${encodeURIComponent(id)}/executive-score`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ score: clamped, feedback }),
+    }).catch((err) => console.error('[API Error] updateExecutiveScore:', err));
+  }, []);
 
   const batchUpdateExecutiveScores = useCallback((scoresMap: Record<string, number>) => {
-    setParticipants((prev) => {
-      const next = prev.map((p) => {
+    setParticipants((prev) =>
+      prev.map((p) => {
         if (scoresMap[p.id] !== undefined) {
           return {
             ...p,
@@ -533,12 +530,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
         }
         return p;
-      });
-      broadcastChange(next, undefined);
-      return next;
-    });
+      })
+    );
     soundManager.playClick();
-  }, [broadcastChange]);
+
+    fetch('/api/participants/batch-scores', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scoresMap }),
+    }).catch((err) => console.error('[API Error] batchUpdateExecutiveScores:', err));
+  }, []);
 
   return (
     <AppContext.Provider
@@ -547,6 +548,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setUserRole,
         adminSubTab,
         setAdminSubTab,
+        isLiveConnected,
         currentEmployeeId,
         currentEmployeeName,
         loginEmployee,
